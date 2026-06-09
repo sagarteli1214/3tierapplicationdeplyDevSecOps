@@ -2,24 +2,17 @@ pipeline {
     agent any
 
     environment {
-        DOCKER_IMAGE = "DOCKER_IMAGE = "sagarteli/devopsexamapp:latest""
+        DOCKER_IMAGE = "vikas4cloud/devopsexamapp:latest"
         SCANNER_HOME = tool 'sonar-scanner'
     }
 
     stages {
 
-        stage('Git Checkout') {
-            steps {
-                echo "📦 Checking out source code..."
-                git url: 'https://github.com/sagarteli1214/3tierapplicationdeplyDevSecOps.git',
-                    branch: 'master'
-            }
-        }
-
+        // ================= INSTALL TRIVY =================
         stage('Install Trivy') {
             steps {
                 sh '''
-                echo "🔧 Installing Trivy..."
+                echo "📦 Installing Trivy..."
                 curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
                 | sh -s -- -b /usr/local/bin
 
@@ -28,119 +21,138 @@ pipeline {
             }
         }
 
+        // ================= GIT CHECKOUT =================
+        stage('Git Checkout') {
+            steps {
+                echo "📦 Checking out source code..."
+                git(
+                    url: 'https://github.com/Ayushmansen500/devops-exam-app.git',
+                    branch: 'master'
+                )
+            }
+        }
+
+        // ================= TRIVY FS SCAN =================
         stage('File System Scan') {
             steps {
                 echo "🔍 Running Trivy File System Scan..."
                 sh '''
                 trivy fs --scanners vuln,misconfig \
-                --format table \
-                -o trivy-fs-report.html .
+                --format table -o trivy-fs-report.html .
                 '''
             }
         }
 
+        // ================= SONARQUBE =================
         stage('SonarQube Analysis') {
             steps {
-                echo "🧠 Running SonarQube Code Analysis..."
+                echo "🧠 Running SonarQube Analysis..."
                 withSonarQubeEnv('sonar') {
-                    sh """
+                    sh '''
                     ${SCANNER_HOME}/bin/sonar-scanner \
                     -Dsonar.projectKey=devops-exam-app \
                     -Dsonar.projectName=devops-exam-app \
                     -Dsonar.sources=. \
+                    -Dsonar.language=py \
                     -Dsonar.host.url=http://localhost:9000
-                    """
+                    '''
                 }
             }
         }
 
-        stage('Verify Docker') {
+        // ================= DOCKER VERIFY =================
+        stage('Verify Docker Compose') {
             steps {
+                echo "🧩 Checking Docker Compose..."
                 sh '''
-                docker --version || exit 1
-                docker compose version || echo "⚠ Docker Compose not available"
+                docker compose version || { echo "❌ Docker Compose missing"; exit 1; }
                 '''
             }
         }
 
+        // ================= BUILD & PUSH =================
         stage('Build and Push Docker Image') {
             steps {
                 dir('backend') {
                     script {
-                        echo "🐳 Building and pushing Docker image..."
+                        echo "🐳 Building Docker Image..."
 
                         withDockerRegistry(credentialsId: 'docker') {
-                            sh """
-                            docker build -t ${DOCKER_IMAGE} .
-                            docker push ${DOCKER_IMAGE}
-                            """
+                            sh "docker build -t ${DOCKER_IMAGE} ."
+                            sh "docker push ${DOCKER_IMAGE}"
                         }
                     }
                 }
             }
         }
 
+        // ================= TRIVY IMAGE SCAN =================
         stage('Trivy Image Scan') {
             steps {
-                sh """
+                echo "🔍 Scanning Docker Image..."
+                sh '''
                 trivy image --scanners vuln,misconfig \
-                --format table \
-                -o trivy-image-report.html \
-                ${DOCKER_IMAGE}
-                """
+                --format table -o trivy-image-report.html ${DOCKER_IMAGE}
+                '''
             }
         }
 
+        // ================= DEPLOY =================
         stage('Deploy with Docker Compose') {
             steps {
+                echo "🚀 Deploying application..."
                 sh '''
-                echo "🚀 Deploying with Docker Compose..."
-
                 docker compose down --remove-orphans || true
-                docker compose up -d --build || true
+                docker compose up -d --build
 
                 echo "⏳ Waiting for MySQL..."
+                timeout 120s bash -c '
+                    while ! docker compose exec -T mysql mysqladmin ping -uroot -prootpass --silent; do
+                        sleep 5
+                    done
+                '
                 sleep 10
                 '''
             }
         }
 
+        // ================= VERIFY =================
         stage('Verify Deployment') {
             steps {
+                echo "✅ Verifying deployment..."
                 sh '''
-                echo "=== Container Status ==="
-                docker compose ps || true
-
-                echo "=== App Check ==="
+                docker compose ps -a
                 curl -I http://localhost:5000 || true
                 '''
             }
         }
     }
 
+    // ================= POST ACTIONS =================
     post {
 
         success {
-            echo "🎉 Deployment successful!"
-            sh 'docker compose ps || true'
+            echo "🎉 Pipeline SUCCESS"
+            sh "docker compose ps || true"
 
             archiveArtifacts artifacts: 'trivy-fs-report.html', allowEmptyArchive: true
             archiveArtifacts artifacts: 'trivy-image-report.html', allowEmptyArchive: true
         }
 
         failure {
-            echo "❌ Pipeline failed"
+            echo "❌ Pipeline FAILED"
 
             sh '''
-            echo "=== Debug Logs ==="
+            echo "=== ERROR LOGS ==="
             docker compose logs --tail=50 || true
             '''
         }
 
         always {
-            echo "📋 Final cleanup logs"
+            echo "📋 Collecting logs..."
 
             sh '''
+            echo "=== FINAL LOGS ==="
             docker compose logs --tail=20 || true
             '''
 
